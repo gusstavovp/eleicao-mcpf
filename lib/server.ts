@@ -47,3 +47,11 @@ export function bucket(r:Request){
  async delete(keys:string[]){const {error}=await b.remove(keys);if(error)throw error;}
  };
 }
+
+export async function access(r:Request){
+ const u=await getUser(r);
+ if(!u?.email_confirmed_at||u.is_anonymous)return null;
+ if(u.email?.toLowerCase()===ADMIN_EMAIL)return {role:'admin',class_id:null};
+ const {data,error}=await client(r).from('class_memberships').select('role,class_id').eq('email',u.email!.toLowerCase()).maybeSingle();
+ if(error)throw error;return data;
+}

@@ -1,14 +1,11 @@
 'use client';
 import {useState,useEffect} from 'react';
 import {supabase} from '../lib/supabase';
-export default function Login({onLogin}:{onLogin:()=>void}){
- const [email,setEmail]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false);
+export default function Login({onLogin,title='Acesso'}:{onLogin:()=>void,title?:string}){
+ const [email,setEmail]=useState(''),[code,setCode]=useState(''),[sent,setSent]=useState(false),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[cooldown,setCooldown]=useState(0);
  useEffect(()=>{const {data}=supabase.auth.onAuthStateChange(()=>{setTimeout(onLogin,0)});return()=>data.subscription.unsubscribe();},[]);
- async function send(e:React.FormEvent){e.preventDefault();setBusy(true);setMessage('');
- try{
- const {error}=await supabase.auth.signInWithOtp({email:email.trim().toLowerCase(),options:{emailRedirectTo:window.location.origin+'/admin'}});
- if(error)throw error;
- setMessage('Verifique sua caixa de entrada e abra o link de acesso. Confira também o spam.');
- }catch(e:any){setMessage(e.message)}finally{setBusy(false)}}
- return <section className="panel login"><span className="lock">⌑</span><h2>Acesso do administrador</h2><p>Receba um link de verificação no seu e-mail. Não é necessário criar senha.</p><form onSubmit={send}><label>E-mail autorizado<input type="email" autoComplete="email" value={email} onChange={e=>setEmail(e.target.value)} required placeholder="Seu e-mail"/></label><button className="primary full" disabled={busy}>{busy?'Enviando…':'Receber link de acesso →'}</button></form>{message&&<p role="status">{message}</p>}<small className="muted">O link é pessoal e só pode ser usado uma vez.</small></section>
+ useEffect(()=>{if(!cooldown)return;const t=setTimeout(()=>setCooldown(c=>c-1),1000);return()=>clearTimeout(t)},[cooldown]);
+ async function send(){setBusy(true);setMessage('');try{const {error}=await supabase.auth.signInWithOtp({email:email.trim().toLowerCase()});if(error)throw error;setSent(true);setCooldown(60);setMessage('Código enviado. Confira sua caixa de entrada e o spam.');}catch{setMessage('Não foi possível enviar. Confira o e-mail e aguarde um minuto antes de tentar novamente.')}finally{setBusy(false)}}
+ async function verify(e:React.FormEvent){e.preventDefault();setBusy(true);setMessage('');try{const {error}=await supabase.auth.verifyOtp({email:email.trim().toLowerCase(),token:code,type:'email'});if(error)throw error;onLogin()}catch{setMessage('Código inválido ou expirado. Confira o código recebido ou solicite outro.')}finally{setBusy(false)}}
+ return <section className="panel login"><span className="lock">⌑</span><h2>{title}</h2><p>Entre com o código enviado ao seu e-mail. Não é necessário criar senha.</p><form onSubmit={sent?verify:e=>{e.preventDefault();void send()}}><label>E-mail autorizado<input type="email" autoComplete="email" value={email} onChange={e=>setEmail(e.target.value)} required readOnly={sent} placeholder="Seu e-mail"/></label>{sent&&<label>Código de verificação<input type="text" inputMode="numeric" autoComplete="one-time-code" value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,''))} required pattern="[0-9]{6,10}" minLength={6} maxLength={10} autoFocus/></label>}<button className="primary full" disabled={busy}>{busy?'Aguarde…':sent?'Entrar →':'Receber código →'}</button></form>{sent&&<div className="actions"><button disabled={busy||cooldown>0} onClick={send}>{cooldown?`Reenviar em ${cooldown}s`:'Reenviar código'}</button><button disabled={busy} onClick={()=>{setSent(false);setCode('');setMessage('')}}>Trocar e-mail</button></div>}{message&&<p role="status">{message}</p>}<small className="muted">Você pode entrar novamente quando precisar. Cada código vale para um acesso.</small></section>
 }

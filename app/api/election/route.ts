@@ -1,26 +1,40 @@
-import {database,bucket,isAdmin as auth,getUser} from '../../../lib/server';
+import {database,bucket,isAdmin as auth,getUser,access,client} from '../../../lib/server';
 export const dynamic='force-dynamic';
 
 const json=(x:any,status=200,headers:any={})=>Response.json(x,{status,headers:{'Cache-Control':'no-store',...headers}});
-export async function GET(r:Request){const rows=await database(r).prepare('SELECT * FROM elections ORDER BY rowid DESC').all();return json({admin:await auth(r),signedIn:!!await getUser(r),classes:rows.results.map((x:any)=>({...JSON.parse(x.data),revision:x.revision}))},200,{'Set-Cookie':'mcpf_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0'});}
+export async function GET(r:Request){
+ const rows=await database(r).prepare('SELECT * FROM elections ORDER BY rowid DESC').all();
+ const profile=await access(r);let voted:string[]=[];
+ if(profile?.role==='student'){const {data,error}=await client(r).from('vote_receipts').select('election_id');if(error)throw error;voted=(data||[]).map(x=>x.election_id);}
+ return json({admin:profile?.role==='admin',profile,signedIn:!!await getUser(r),voted,classes:rows.results.map((x:any)=>({...JSON.parse(x.data),revision:x.revision}))});
+}
 export async function POST(r:Request){
  try{
  if(r.headers.get('origin')!==new URL(r.url).origin)return json({error:'Origem inválida'},403);
+ const profile=await access(r);
  if(r.headers.get('content-type')?.includes('multipart/form-data')){
- if(!await auth(r))return json({error:'Faça login para enviar fotos.'},401);
+ if(!profile||!['admin','teacher'].includes(profile.role))return json({error:'Acesso restrito.'},403);
  const form=await r.formData(),file=form.get('photo');
+ if(profile.role==='teacher'&&form.get('classId')!==profile.class_id)return json({error:'Turma não autorizada.'},403);
  if(!(file instanceof File)||file.size<12||file.size>2*1024*1024)return json({error:'Envie uma imagem de até 2 MB.'},400);
  const bytes=new Uint8Array(await file.arrayBuffer());
  const png=bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71;
  const jpg=bytes[0]===255&&bytes[1]===216&&bytes[2]===255;
  const webp=String.fromCharCode(...bytes.slice(0,4))==='RIFF'&&String.fromCharCode(...bytes.slice(8,12))==='WEBP';
  if(!png&&!jpg&&!webp)return json({error:'Use uma foto JPG, PNG ou WebP.'},400);
- const id=crypto.randomUUID();await bucket(r).put('candidates/'+id,bytes,{httpMetadata:{contentType:png?'image/png':jpg?'image/jpeg':'image/webp'}});
- return json({url:'/api/photos/'+id});
+ const id=crypto.randomUUID();await bucket(r).put('candidates/'+(profile.role==='teacher'?profile.class_id+'/':'')+id,bytes,{httpMetadata:{contentType:png?'image/png':jpg?'image/jpeg':'image/webp'}});
+ return json({url:profile.role==='teacher'?process.env.NEXT_PUBLIC_SUPABASE_URL+'/storage/v1/object/public/candidate-photos/candidates/'+profile.class_id+'/'+id:'/api/photos/'+id});
  }
  const b=await r.json();
  if(b.action==='login')return json({error:'O login com senha foi removido. Entre pelo link de verificação enviado ao seu e-mail.'},410);
- if(!await auth(r))return json({error:'Faça login para continuar.'},401);
+ if(!profile)return json({error:'E-mail sem acesso autorizado.'},403);
+ if(b.action==='studentVote'){
+ if(profile.role!=='student'||profile.class_id!==b.id)return json({error:'Você só pode votar na sua turma.'},403);
+ const {error}=await client(r).rpc('cast_student_vote',{p_class:b.id,p_election:b.electionId,p_leader:b.leader??null,p_vice:b.vice??null});
+ if(error)return json({error:error.message},409);return json({ok:true});
+ }
+ if(profile.role==='student')return json({error:'Alunos não podem administrar eleições.'},403);
+ if(profile.role==='teacher'&&(!['configure','start'].includes(b.action)||b.id!==profile.class_id))return json({error:'Você só pode administrar sua turma.'},403);
  if(b.action==='seedClasses'){
  const rows=await database(r).prepare('SELECT data FROM elections').all();
  const existing=new Set(rows.results.map((x:any)=>JSON.parse(x.data).name.replace(/[°º]/g,'').replace(/\s/g,'').toUpperCase()));
@@ -51,7 +65,7 @@ export async function POST(r:Request){
  const list=b.candidates?.[role];
  if(!Array.isArray(list)||!list.length||list.length>100)throw Error('Cadastre de 1 a 100 candidatos por cargo.');
  candidates[role]=list.map((x:any)=>({id:String(x.id||'').trim(),name:String(x.name||'').trim(),photo:String(x.photo||''),votes:0}));
- if(candidates[role].some((x:any)=>x.photo&&!/^\/api\/photos\/[a-f0-9-]{36}$/.test(x.photo)))throw Error('Foto inválida. Envie novamente pelo cadastro.');
+ if(candidates[role].some((x:any)=>x.photo&&!/^\/api\/photos\/[a-f0-9-]{36}$/.test(x.photo)&&!x.photo.startsWith(process.env.NEXT_PUBLIC_SUPABASE_URL+'/storage/v1/object/public/candidate-photos/candidates/'+b.id+'/')))throw Error('Foto inválida. Envie novamente pelo cadastro.');
  if(candidates[role].some((x:any)=>!/^\d{2}$/.test(x.id)||!x.name||x.name.length>80))throw Error('Cada candidato precisa de nome e número com exatamente 2 dígitos.');
  if(new Set(candidates[role].map((x:any)=>x.id)).size!==list.length)throw Error('Não repita números dentro do mesmo cargo.');
  if(new Set(candidates[role].map((x:any)=>x.name.toLowerCase())).size!==list.length)throw Error('Não repita nomes dentro do mesmo cargo.');
