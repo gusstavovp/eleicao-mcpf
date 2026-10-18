@@ -6,7 +6,9 @@ export async function GET(r:Request){
  const rows=await database(r).prepare('SELECT * FROM elections ORDER BY rowid DESC').all();
  const profile=await access(r);let voted:string[]=[];
  if(profile?.role==='student'){const {data,error}=await client(r).from('vote_receipts').select('election_id');if(error)throw error;voted=(data||[]).map(x=>x.election_id);}
- return json({admin:profile?.role==='admin',profile,signedIn:!!await getUser(r),voted,classes:rows.results.map((x:any)=>({...JSON.parse(x.data),revision:x.revision}))});
+ let roster:any[]=[];let receipts:any[]=[];
+ if(profile?.role==='admin'){const sb=client(r);const [m,v]=await Promise.all([sb.from('class_memberships').select('email,class_id,display_name,call_number').eq('role','student').not('call_number','is',null).order('call_number'),sb.from('vote_receipts').select('email,election_id')]);if(m.error||v.error)throw m.error||v.error;roster=m.data||[];receipts=v.data||[];}
+ return json({roster,receipts,admin:profile?.role==='admin',profile,signedIn:!!await getUser(r),voted,classes:rows.results.map((x:any)=>({...JSON.parse(x.data),revision:x.revision}))});
 }
 export async function POST(r:Request){
  try{
@@ -91,6 +93,14 @@ export async function POST(r:Request){
  if(c.autoRoles.leader&&c.autoRoles.vice){c.status='finished';c.automatic=true;c.approval=100;c.finishedAt=c.startedAt;}
  }
  else if(b.action==='vote'){
+ const {data:members,error:memberError}=await client(r).from('class_memberships').select('email').eq('class_id',c.id).not('call_number','is',null).limit(1);
+ if(memberError)throw memberError;
+ if(members?.length){
+ if(typeof b.voterEmail!=='string')return json({error:'Atualize a página para usar a chamada.'},409);
+ const {error}=await client(r).rpc('cast_roll_vote',{p_class:c.id,p_election:b.electionId,p_leader:b.leader??null,p_vice:b.vice??null,p_voter:b.voterEmail});
+ if(error)return json({error:error.message},409);return json({ok:true});
+ }
+
  if(c.status!=='active'||c.cast>=c.total)return json({error:'A votação foi encerrada.'},409);
  if(b.electionId!==c.electionId||b.session!==c.cast+1)return json({error:'Esta sessão já foi registrada. Atualize a urna.'},409);
  c.nulls=c.nulls||{leader:0,vice:0};
