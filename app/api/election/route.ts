@@ -101,18 +101,8 @@ export async function POST(r:Request){
  if(error)return json({error:error.message},409);return json({ok:true});
  }
 
- if(c.status!=='active'||c.cast>=c.total)return json({error:'A votação foi encerrada.'},409);
- if(b.electionId!==c.electionId||b.session!==c.cast+1)return json({error:'Esta sessão já foi registrada. Atualize a urna.'},409);
- c.nulls=c.nulls||{leader:0,vice:0};
- for(const role of ['leader','vice']){
- if(c.autoRoles?.[role])continue;
- if(b[role]===null)c.blank[role]++;
- else{
- if(typeof b[role]!=='string'||!/^\d{2}$/.test(b[role]))return json({error:'Digite exatamente dois números ou escolha BRANCO.'},400);
- const candidate=c.candidates[role].find((x:any)=>x.id===b[role]);
- if(candidate)candidate.votes++;else c.nulls[role]++;
- }}
- c.cast++;if(c.cast===c.total){c.status='finished';c.finishedAt=new Date().toISOString();}
+ const {error}=await client(r).rpc('cast_roll_vote',{p_class:c.id,p_election:b.electionId,p_leader:b.leader??null,p_vice:b.vice??null,p_voter:'session:'+b.session});
+ if(error)return json({error:error.message},409);return json({ok:true});
  }else return json({error:'Ação inválida.'},400);
  const result=await database(r).prepare('UPDATE elections SET data=?,revision=revision+1 WHERE id=? AND revision=?').bind(JSON.stringify(c),c.id,row.revision).run();if(!result.meta.changes)return json({error:'A urna foi atualizada em outro dispositivo. Atualize e tente novamente.'},409);return json({ok:true});
  }catch{return json({error:'Não foi possível concluir. Tente novamente.'},500);}
