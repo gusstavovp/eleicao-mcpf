@@ -4,11 +4,11 @@ export const dynamic='force-dynamic';
 const json=(x:any,status=200,headers:any={})=>Response.json(x,{status,headers:{'Cache-Control':'no-store',...headers}});
 export async function GET(r:Request){
  const rows=await database(r).prepare('SELECT * FROM elections ORDER BY rowid DESC').all();
- const profile=await access(r);let voted:string[]=[];
- if(profile?.role==='student'){const {data,error}=await client(r).from('vote_receipts').select('election_id');if(error)throw error;voted=(data||[]).map(x=>x.election_id);}
+ const profile=await access(r);let voted:string[]=[];let absent:string[]=[];
+ if(profile?.role==='student'){const {data,error}=await client(r).from('vote_receipts').select('election_id,attendance');if(error)throw error;voted=(data||[]).map(x=>x.election_id);absent=(data||[]).filter(x=>x.attendance==='absent').map(x=>x.election_id);}
  let roster:any[]=[];let receipts:any[]=[];
- if(profile?.role==='admin'){const sb=client(r);const [m,v]=await Promise.all([sb.from('class_memberships').select('email,class_id,display_name,call_number').eq('role','student').not('call_number','is',null).order('call_number'),sb.from('vote_receipts').select('email,election_id')]);if(m.error||v.error)throw m.error||v.error;roster=m.data||[];receipts=v.data||[];}
- return json({roster,receipts,admin:profile?.role==='admin',profile,signedIn:!!await getUser(r),voted,classes:rows.results.map((x:any)=>({...JSON.parse(x.data),revision:x.revision}))});
+ if(profile?.role==='admin'||profile?.role==='teacher'){const {data,error}=await client(r).rpc('get_roll_call');if(error)throw error;roster=data.roster;receipts=data.receipts;}
+ return json({roster,receipts,admin:profile?.role==='admin',profile,signedIn:!!await getUser(r),voted,absent,classes:rows.results.map((x:any)=>({...JSON.parse(x.data),revision:x.revision}))});
 }
 export async function POST(r:Request){
  try{
@@ -36,7 +36,11 @@ export async function POST(r:Request){
  if(error)return json({error:error.message},409);return json({ok:true});
  }
  if(profile.role==='student')return json({error:'Alunos não podem administrar eleições.'},403);
- if(profile.role==='teacher'&&(!['configure','start'].includes(b.action)||b.id!==profile.class_id))return json({error:'Você só pode administrar sua turma.'},403);
+ if(profile.role==='teacher'&&(!['configure','start','vote','abstain','close'].includes(b.action)||b.id!==profile.class_id))return json({error:'Você só pode administrar sua turma.'},403);
+ if(b.action==='abstain'||b.action==='close'){
+ const {error}=await client(r).rpc('manage_attendance',{p_class:b.id,p_election:b.electionId,p_action:b.action,p_voter:b.voterEmail??('session:'+b.session)});
+ if(error)return json({error:error.message},409);return json({ok:true});
+ }
  if(b.action==='seedClasses'){
  const rows=await database(r).prepare('SELECT data FROM elections').all();
  const existing=new Set(rows.results.map((x:any)=>JSON.parse(x.data).name.replace(/[°º]/g,'').replace(/\s/g,'').toUpperCase()));
@@ -85,16 +89,19 @@ export async function POST(r:Request){
  if(c.status==='finished'){
  const {history,...snapshot}=c;c.history=[...(history||[]),snapshot];c.round=(c.round||1)+1;c.electionId=crypto.randomUUID();
  }
- delete c.autoRoles;delete c.automatic;delete c.approval;delete c.finishedAt;delete c.startedAt;
- Object.assign(c,settings,{status:'draft',cast:0,nulls:{leader:0,vice:0},blank:{leader:0,vice:0}});
+ delete c.zeresima;delete c.autoRoles;delete c.automatic;delete c.approval;delete c.finishedAt;delete c.startedAt;
+ Object.assign(c,settings,{status:'draft',cast:0,abstentions:0,nulls:{leader:0,vice:0},blank:{leader:0,vice:0}});
  }
- else if(b.action==='start'){if(c.status!=='draft')return json({error:'Prepare uma nova eleição antes de iniciar.'},409);if(b.revision!==row.revision)return json({error:'O cadastro mudou. Confira e tente novamente.'},409);if(c.total<1||!c.candidates.leader.length||!c.candidates.vice.length)return json({error:'Configure alunos e candidatos antes de iniciar.'},400);c.status='active';c.electionId=c.electionId||crypto.randomUUID();c.startedAt=new Date().toISOString();
+ else if(b.action==='start'){if(c.status!=='draft')return json({error:'Prepare uma nova eleição antes de iniciar.'},409);if(b.revision!==row.revision)return json({error:'O cadastro mudou. Confira e tente novamente.'},409);if(c.total<1||!c.candidates.leader.length||!c.candidates.vice.length)return json({error:'Configure alunos e candidatos antes de iniciar.'},400);const {data:call,error:callError}=await client(r).rpc('get_roll_call');if(callError)throw callError;
+ const enrolled=call.roster.filter((m:any)=>m.class_id===c.id).length;
+ if(enrolled&&enrolled!==c.total)return json({error:`A turma tem ${enrolled} alunos na chamada. Ajuste a quantidade de alunos antes de iniciar.`},409);
+ c.abstentions=0;c.zeresima={issuedAt:new Date().toISOString(),candidates:JSON.parse(JSON.stringify(c.candidates)),blank:{leader:0,vice:0},nulls:{leader:0,vice:0}};
+ c.status='active';c.electionId=c.electionId||crypto.randomUUID();c.startedAt=new Date().toISOString();
  c.autoRoles={leader:c.candidates.leader.length===1,vice:c.candidates.vice.length===1};
  if(c.autoRoles.leader&&c.autoRoles.vice){c.status='finished';c.automatic=true;c.approval=100;c.finishedAt=c.startedAt;}
  }
  else if(b.action==='vote'){
- const {data:members,error:memberError}=await client(r).from('class_memberships').select('email').eq('class_id',c.id).not('call_number','is',null).limit(1);
- if(memberError)throw memberError;
+ const {data:call,error:memberError}=await client(r).rpc('get_roll_call');if(memberError)throw memberError;const members=call.roster.filter((m:any)=>m.class_id===c.id);
  if(members?.length){
  if(typeof b.voterEmail!=='string')return json({error:'Atualize a página para usar a chamada.'},409);
  const {error}=await client(r).rpc('cast_roll_vote',{p_class:c.id,p_election:b.electionId,p_leader:b.leader??null,p_vice:b.vice??null,p_voter:b.voterEmail});
